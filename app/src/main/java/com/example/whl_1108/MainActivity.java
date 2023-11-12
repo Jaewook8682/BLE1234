@@ -11,6 +11,7 @@ import android.bluetooth.BluetoothDevice;
 import android.bluetooth.BluetoothGatt;
 import android.bluetooth.BluetoothGattCallback;
 import android.bluetooth.BluetoothGattCharacteristic;
+import android.bluetooth.BluetoothGattService;
 import android.bluetooth.BluetoothManager;
 import android.bluetooth.BluetoothProfile;
 import android.bluetooth.le.BluetoothLeScanner;
@@ -39,6 +40,8 @@ import java.util.List;
 import java.util.Map;
 
 public class MainActivity extends AppCompatActivity {
+    private String UUID_READ = "19B10001-E8F2-537E-4F6C-D104768A1214";
+    private String UUID_WRITE = "19B10002-E8F2-537E-4F6C-D104768A1214";
     private final static int REQUEST_ENABLE_BT = 1;
     public final static int SCAN_PERIOD= 5000;
     private static final int PERMISSION_REQUEST_COARSE_LOCATION = 1;
@@ -97,7 +100,7 @@ public class MainActivity extends AppCompatActivity {
         DisconnectButton.setOnClickListener(new View.OnClickListener() {
             @Override
             public void onClick(View v) {
-                tv_status_.append("Disconnecting from device\n");
+                tv_status_.setText("Disconnecting from device\n");
                 ble_gatt_.disconnect();
             }
         });
@@ -107,7 +110,7 @@ public class MainActivity extends AppCompatActivity {
         device_list_.setAdapter(bt_ArrayAdapter);
         device_list_.setOnItemClickListener(DeviceClickListener);
 
-        
+
         stopScanningButton.setVisibility(View.INVISIBLE);
 
         btManager = (BluetoothManager)getSystemService(Context.BLUETOOTH_SERVICE);
@@ -190,7 +193,7 @@ public class MainActivity extends AppCompatActivity {
     }
 
     public void stopScanning() {
-        tv_status_.setText("Finish Scanning...");
+        tv_status_.setText("Stop Scanning...");
         startScanningButton.setVisibility(View.VISIBLE);
         stopScanningButton.setVisibility(View.INVISIBLE);
         AsyncTask.execute(new Runnable() {
@@ -235,9 +238,10 @@ public class MainActivity extends AppCompatActivity {
                 return;
             }
             if (newState == BluetoothProfile.STATE_CONNECTED){
+                connected_= true;
+                gatt.discoverServices();
                 tv_status_.setText("Connected...");
                 Log.d( TAG, "Connected to the GATT server" );
-                connected_= true;
             } else if (newState == BluetoothProfile.STATE_DISCONNECTING) {
                 tv_status_.setText("Disconnected...");
                 disconnectGattServer();
@@ -246,50 +250,79 @@ public class MainActivity extends AppCompatActivity {
         }
 
         @Override
-        public void onCharacteristicChanged(@NonNull BluetoothGatt gatt, @NonNull BluetoothGattCharacteristic characteristic, @NonNull byte[] value) {
-            super.onCharacteristicChanged(gatt, characteristic, value);
-            Log.d( TAG, "characteristic changed: " + characteristic.getUuid().toString() );
-            readCharacteristic(characteristic);
-        }
-        @Override
-        public void onCharacteristicWrite(BluetoothGatt gatt, BluetoothGattCharacteristic characteristic, int status) {
-            super.onCharacteristicWrite(gatt, characteristic, status);
-            if( status == BluetoothGatt.GATT_SUCCESS ) {
-                Log.d( TAG, "Characteristic written successfully" );
-            } else {
-                Log.e( TAG, "Characteristic write unsuccessful, status: " + status) ;
-                disconnectGattServer();
+        public void onServicesDiscovered(BluetoothGatt gatt, int status) {
+            super.onServicesDiscovered(gatt, status);
+            if(status == BluetoothGatt.GATT_SUCCESS){
+                List<BluetoothGattService> services = gatt.getServices();
+                for(BluetoothGattService service : services){
+                    for(BluetoothGattCharacteristic characteristic : service.getCharacteristics()){
+                        if(hasProperty(characteristic, BluetoothGattCharacteristic.PROPERTY_READ)){
+                            gatt.readCharacteristic(characteristic);
+                        }
+                        if (hasProperty(characteristic, BluetoothGattCharacteristic.PROPERTY_NOTIFY)){
+                            gatt.setCharacteristicNotification(characteristic, true);
+                        }
+                    }
+                }
             }
         }
 
         @Override
         public void onCharacteristicRead(@NonNull BluetoothGatt gatt, @NonNull BluetoothGattCharacteristic characteristic, @NonNull byte[] value, int status) {
             super.onCharacteristicRead(gatt, characteristic, value, status);
-            if (status == BluetoothGatt.GATT_SUCCESS) {
-                Log.d (TAG, "Characteristic read successfully" );
-                readCharacteristic(characteristic);
-            } else {
-                Log.e( TAG, "Characteristic read unsuccessful, status: " + status);
-                // Trying to read from the Time Characteristic? It doesnt have the property or permissions
-                // set to allow this. Normally this would be an error and you would want to:
-                // disconnectGattServer();
+            if(status==BluetoothGatt.GATT_SUCCESS){
+                if(onReadValueListener == null) return;
+                scan_handler.post(
+                        ()->onReadValueListener.onValue(gatt.getDevice(), onReadValueListener.formatter(characteristic))
+                );
             }
+        }
+
+        @Override
+        public void onCharacteristicChanged(@NonNull BluetoothGatt gatt, @NonNull BluetoothGattCharacteristic characteristic, @NonNull byte[] value) {
+            super.onCharacteristicChanged(gatt, characteristic, value);
+            if(onNotifyValueListener == null) return;
+            scan_handler.post(()->onNotifyValueListener.onValue(gatt.getDevice(), onNotifyValueListener.formatter(characteristic))
+            );
         }
     }
 
-    private void readCharacteristic( BluetoothGattCharacteristic _characteristic ) {
-        byte[] msg= _characteristic.getValue();
-        Log.d( TAG, "read: " + msg.toString() );
-    }
-
     public void disconnectGattServer() {
-        Log.d( TAG, "Closing Gatt connection" );
+        Log.d(TAG, "Closing Gatt connection");
         // reset the connection flag
-        connected_= false;
+        connected_ = false;
         // disconnect and close the gatt
-        if( ble_gatt_ != null ) {
+        if (ble_gatt_ != null) {
             ble_gatt_.disconnect();
             ble_gatt_.close();
         }
     }
+    public boolean hasProperty(BluetoothGattCharacteristic characteristic, int property)
+    {
+        int prop = characteristic.getProperties() & property;
+        return prop == property;
+    }
+    public interface OnNotifyValueListener <T>{
+        void onValue(BluetoothDevice deivce, T value);
+        T formatter(BluetoothGattCharacteristic characteristic);
+    }
+
+    public interface OnReadValueListener <T>{
+        void onValue(BluetoothDevice deivce, T value);
+        T formatter(BluetoothGattCharacteristic characteristic);
+    }
+
+    private OnNotifyValueListener onNotifyValueListener = null;
+    public MainActivity setOnNotifyValueListener(OnNotifyValueListener onNotifyValueListener) {
+        this.onNotifyValueListener = onNotifyValueListener;
+        return this;
+    }
+
+
+    private OnReadValueListener onReadValueListener = null;
+    public MainActivity setOnReadValueListener(OnReadValueListener onReadValueListener) {
+        this.onReadValueListener = onReadValueListener;
+        return this;
+    }
+
 }
